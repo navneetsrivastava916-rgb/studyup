@@ -886,7 +886,7 @@ h1,h2,h3,.logo{font-family:'Instrument Serif',serif}
 // ─────────── CONFIG ───────────────────────────────────────────
 const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? `http://${window.location.hostname}:5000/api`
-  : '/api';
+  : 'https://studyup-production.up.railway.app/api';
 
 // ─────────── STATE ────────────────────────────────────────────
 let token = localStorage.getItem('su_token');
@@ -1010,7 +1010,7 @@ function goTo(page) {
 function initSocket() {
   try {
     socket = io(window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-      ? `http://${window.location.hostname}:5000` : '/');
+      ? `http://${window.location.hostname}:5000` : 'https://studyup-production.up.railway.app');
     socket.on('connect', () => socket.emit('join', currentUser.id));
     socket.on('progress_update', (p) => updateHomeStats(p));
     socket.on('achievement_unlocked', (a) => {
