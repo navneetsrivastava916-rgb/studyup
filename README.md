@@ -1,3 +1,6 @@
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Deployed](https://img.shields.io/badge/deployed-vercel-green)
+![Release](https://img.shields.io/badge/release-v1.0.0-brightgreen)
 # 📚 StudyUp — JEE 2027 Smart Study System
 
 > A full-stack AI-powered study tracking app built for JEE Mains & Advanced 2027 droppers.
