@@ -1,2 +1,22 @@
+# Dependencies
 node_modules/
+Backend/node_modules/
+
+# Environment variables - NEVER commit these
 .env
+Backend/.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Vercel
+.vercel
+
+# IDE
+.vscode/
+.idea/
