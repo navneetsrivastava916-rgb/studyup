@@ -24,14 +24,13 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/studyup')
 const JWT_SECRET = process.env.JWT_SECRET || 'studyup_jee2027_secret';
 const today = () => new Date().toISOString().split('T')[0];
 
-// ── SCHEMAS ──────────────────────────────────────────────────
+// ═══ SCHEMAS ═══
 const UserSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
   weakSubject: { type: String, default: 'Physics' },
-  dailyGoalHours: { type: Number, default: 8 },
-  scheduleSetup: { type: Boolean, default: false },
+  dailyGoal: { type: Number, default: 8 },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -41,7 +40,12 @@ const ProgressSchema = new mongoose.Schema({
   studyTime: { type: Number, default: 0 },
   tasksCompleted: { type: Number, default: 0 },
   tasksTotal: { type: Number, default: 0 },
-  subjectTime: { Physics: Number, Chemistry: Number, Mathematics: Number }
+  lecturesDone: { type: Number, default: 0 },
+  subjectTime: {
+    Physics: { type: Number, default: 0 },
+    Chemistry: { type: Number, default: 0 },
+    Mathematics: { type: Number, default: 0 }
+  }
 }, { timestamps: true });
 
 const TaskSchema = new mongoose.Schema({
@@ -49,6 +53,7 @@ const TaskSchema = new mongoose.Schema({
   title: { type: String, required: true },
   subject: { type: String, required: true },
   chapter: { type: String, default: '' },
+  lectures: { type: Number, default: 0 },
   priority: { type: String, default: 'Medium' },
   importance: { type: String, default: 'Important' },
   timeRequired: { type: Number, default: 60 },
@@ -76,13 +81,15 @@ const AchievementSchema = new mongoose.Schema({
 const ChatSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   role: { type: String, enum: ['user','assistant'] },
-  content: String, timestamp: { type: Date, default: Date.now }
+  content: String,
+  timestamp: { type: Date, default: Date.now }
 });
 
 const MockTestSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   score: Number, totalQ: Number, correct: Number, wrong: Number, skipped: Number,
-  timeTaken: Number, subjectScores: { Physics: Number, Chemistry: Number, Mathematics: Number },
+  timeTaken: Number,
+  subjectScores: { Physics: Number, Chemistry: Number, Mathematics: Number },
   completedAt: { type: Date, default: Date.now }
 });
 
@@ -94,7 +101,7 @@ const Achievement = mongoose.model('Achievement', AchievementSchema);
 const Chat = mongoose.model('Chat', ChatSchema);
 const MockTest = mongoose.model('MockTest', MockTestSchema);
 
-// ── AUTH MIDDLEWARE ──────────────────────────────────────────
+// ═══ AUTH MIDDLEWARE ═══
 const auth = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
@@ -105,14 +112,14 @@ const auth = async (req, res, next) => {
   } catch { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// ── HELPERS ──────────────────────────────────────────────────
+// ═══ HELPERS ═══
 async function calcStreak(userId) {
   const records = await Progress.find({ userId, studyTime: { $gt: 0 } }).sort({ date: -1 }).lean();
   if (!records.length) return 0;
   let streak = 0;
   let check = new Date(); check.setHours(0,0,0,0);
-  for (const rec of records) {
-    const rd = new Date(rec.date); rd.setHours(0,0,0,0);
+  for (const r of records) {
+    const rd = new Date(r.date); rd.setHours(0,0,0,0);
     const diff = Math.round((check - rd) / 86400000);
     if (diff <= 1) { streak++; check = rd; } else break;
   }
@@ -120,232 +127,340 @@ async function calcStreak(userId) {
 }
 
 async function calcRank(userId) {
-  const pipeline = [
-    { $group: { _id: '$userId', total: { $sum: '$studyTime' } } },
-    { $sort: { total: -1 } }
-  ];
-  const all = await Progress.aggregate(pipeline);
-  const idx = all.findIndex(u => u._id.toString() === userId.toString());
-  return idx === -1 ? all.length + 1 : idx + 1;
+  const thirtyAgo = new Date(); thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+  const results = await Progress.aggregate([
+    { $match: { date: { $gte: thirtyAgo.toISOString().split('T')[0] }, studyTime: { $gt: 0 } } },
+    { $group: { _id: '$userId', totalTime: { $sum: '$studyTime' } } },
+    { $sort: { totalTime: -1 } }
+  ]);
+  const idx = results.findIndex(r => r._id.toString() === userId.toString());
+  return idx === -1 ? results.length + 1 : idx + 1;
 }
 
 async function checkAchievements(userId, streak, totalTasks, totalHours) {
-  const existing = (await Achievement.find({ userId }).select('title')).map(a => a.title);
+  const existing = await Achievement.find({ userId }).select('title');
+  const earned = existing.map(a => a.title);
+  const newAchs = [];
   const milestones = [
     { title: 'First Step', desc: 'Completed first task!', icon: '🎯', xp: 10, cond: totalTasks >= 1 },
-    { title: 'Task Master', desc: 'Completed 10 tasks!', icon: '✅', xp: 50, cond: totalTasks >= 10 },
-    { title: '3 Day Streak 🔥', desc: '3 consecutive study days', icon: '🔥', xp: 30, cond: streak >= 3 },
-    { title: 'Consistency', desc: '7 days in a row!', icon: '💪', xp: 100, cond: streak >= 7 },
-    { title: 'Discipline', desc: '14 days in a row!', icon: '⚡', xp: 200, cond: streak >= 14 },
-    { title: 'Regular', desc: '30 days in a row!', icon: '📅', xp: 500, cond: streak >= 30 },
-    { title: 'Time Master', desc: 'Studied 8+ hrs in one day!', icon: '⏰', xp: 150, cond: totalHours >= 8 },
-    { title: '100 Hours Club', desc: '100 total hours studied!', icon: '🏆', xp: 300, cond: totalHours >= 100 },
+    { title: 'Task Machine', desc: 'Completed 10 tasks!', icon: '✅', xp: 50, cond: totalTasks >= 10 },
+    { title: 'On Fire', desc: '3 day streak!', icon: '🔥', xp: 30, cond: streak >= 3 },
+    { title: 'Consistency', desc: '7 day streak!', icon: '💪', xp: 100, cond: streak >= 7 },
+    { title: 'Discipline', desc: '14 day streak!', icon: '⚡', xp: 200, cond: streak >= 14 },
+    { title: 'Regular', desc: '30 day streak!', icon: '📅', xp: 500, cond: streak >= 30 },
+    { title: 'Particular', desc: 'Completed daily tasks 5 times!', icon: '🎯', xp: 75, cond: totalTasks >= 5 },
+    { title: 'Time Master', desc: 'Studied 8+ hours in a day!', icon: '⏰', xp: 150, cond: totalHours >= 8 },
+    { title: '100 Hours Club', desc: 'Total 100 hours studied!', icon: '🏆', xp: 300, cond: totalHours >= 100 },
   ];
-  const newAchs = [];
   for (const m of milestones) {
-    if (m.cond && !existing.includes(m.title)) {
-      const ach = await Achievement.create({ userId, title: m.title, description: m.desc, icon: m.icon, xp: m.xp });
-      newAchs.push(ach);
+    if (m.cond && !earned.includes(m.title)) {
+      const a = await Achievement.create({ userId, title: m.title, description: m.desc, icon: m.icon, xp: m.xp, type: 'auto' });
+      newAchs.push(a);
     }
   }
   return newAchs;
 }
 
-const JEE_CHAPTERS = {
+// ═══ REAL SYLLABUS DATA FROM STUDENT NOTES ═══
+// Numbers = lectures per chapter (total: Physics=306, Chemistry=225, Math=309)
+const SYLLABUS = {
   Physics: [
-    { chapter: 'Kinematics', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Laws of Motion', pyq: 7, time: 90, priority: 'High' },
-    { chapter: 'Work Energy Power', pyq: 6, time: 75, priority: 'Medium' },
-    { chapter: 'Rotational Motion', pyq: 9, time: 120, priority: 'High' },
-    { chapter: 'Gravitation', pyq: 5, time: 75, priority: 'Medium' },
-    { chapter: 'Thermodynamics', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'SHM & Waves', pyq: 10, time: 120, priority: 'High' },
-    { chapter: 'Electrostatics', pyq: 12, time: 120, priority: 'High' },
-    { chapter: 'Current Electricity', pyq: 11, time: 120, priority: 'High' },
-    { chapter: 'Magnetic Effects', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Optics', pyq: 10, time: 90, priority: 'High' },
-    { chapter: 'Modern Physics', pyq: 11, time: 90, priority: 'High' },
+    { chapter: 'Kinematics', lectures: 21, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Work Power Energy', lectures: 12, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'EMI', lectures: 13, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Centre of Mass', lectures: 15, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Capacitor', lectures: 13, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Magnetism', lectures: 13, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Rotational Motion', lectures: 21, pyq: 9, time: 120, priority: 'High' },
+    { chapter: 'Current Electricity', lectures: 23, pyq: 11, time: 120, priority: 'High' },
+    { chapter: 'Gravitation', lectures: 5, pyq: 5, time: 75, priority: 'Medium' },
+    { chapter: 'Electrostatics P1', lectures: 16, pyq: 10, time: 90, priority: 'High' },
+    { chapter: 'Electrostatics P2', lectures: 12, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'NLM', lectures: 4, pyq: 5, time: 60, priority: 'Medium' },
+    { chapter: 'Friction', lectures: 6, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'Elasticity', lectures: 4, pyq: 3, time: 60, priority: 'Low' },
+    { chapter: 'Fluid Mechanics', lectures: 11, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'SHM', lectures: 10, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Wave', lectures: 10, pyq: 6, time: 90, priority: 'High' },
+    { chapter: 'Sound Wave', lectures: 7, pyq: 5, time: 75, priority: 'Medium' },
+    { chapter: 'Geometric Optics', lectures: 21, pyq: 10, time: 90, priority: 'High' },
+    { chapter: 'Modern Physics', lectures: 21, pyq: 11, time: 90, priority: 'High' },
+    { chapter: 'Heat Transfer', lectures: 17, pyq: 7, time: 75, priority: 'High' },
+    { chapter: 'KTG', lectures: 4, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'Thermodynamics', lectures: 3, pyq: 5, time: 75, priority: 'High' },
+    { chapter: 'Wave Optics', lectures: 7, pyq: 6, time: 75, priority: 'High' },
   ],
   Chemistry: [
-    { chapter: 'Mole Concept', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Atomic Structure', pyq: 7, time: 75, priority: 'High' },
-    { chapter: 'Chemical Bonding', pyq: 11, time: 90, priority: 'High' },
-    { chapter: 'Chemical Equilibrium', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Ionic Equilibrium', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Electrochemistry', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Chemical Kinetics', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Coordination Compounds', pyq: 10, time: 90, priority: 'High' },
-    { chapter: 'Organic Basics', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Hydrocarbons', pyq: 8, time: 90, priority: 'Medium' },
-    { chapter: 'Aldehydes & Ketones', pyq: 8, time: 75, priority: 'High' },
-    { chapter: 'Biomolecules', pyq: 6, time: 60, priority: 'Medium' },
+    { chapter: 'Mole Concept', lectures: 14, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Gaseous State', lectures: 9, pyq: 5, time: 75, priority: 'Medium' },
+    { chapter: 'Chemical Equilibrium', lectures: 7, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Ionic Equilibrium', lectures: 14, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Thermodynamics Chem', lectures: 18, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Thermochemistry', lectures: 6, pyq: 5, time: 75, priority: 'Medium' },
+    { chapter: 'Solid State', lectures: 10, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Liquid Solution', lectures: 12, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Chemical Kinetics', lectures: 19, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Radioactivity', lectures: 6, pyq: 5, time: 60, priority: 'Medium' },
+    { chapter: 'Electrochemistry', lectures: 19, pyq: 9, time: 90, priority: 'High' },
+    { chapter: 'Surface Chemistry', lectures: 7, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'Periodicity', lectures: 4, pyq: 5, time: 60, priority: 'Medium' },
+    { chapter: 'S Block', lectures: 5, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'P Block', lectures: 9, pyq: 7, time: 75, priority: 'High' },
+    { chapter: 'D Block', lectures: 7, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Metallurgy', lectures: 9, pyq: 5, time: 75, priority: 'Medium' },
+    { chapter: 'Salt Analysis', lectures: 5, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'Grignard Reagent', lectures: 8, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Named Reactions', lectures: 7, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Carbonyl Compounds', lectures: 2, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'A.P Datta Effect', lectures: 3, pyq: 4, time: 60, priority: 'Medium' },
   ],
   Mathematics: [
-    { chapter: 'Quadratic Equations', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Complex Numbers', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Matrices & Determinants', pyq: 10, time: 90, priority: 'High' },
-    { chapter: 'Permutation & Combination', pyq: 7, time: 75, priority: 'High' },
-    { chapter: 'Probability', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Limits & Continuity', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Differentiation', pyq: 10, time: 90, priority: 'High' },
-    { chapter: 'Integration', pyq: 14, time: 120, priority: 'High' },
-    { chapter: 'Differential Equations', pyq: 8, time: 90, priority: 'High' },
-    { chapter: 'Coordinate Geometry', pyq: 11, time: 90, priority: 'High' },
-    { chapter: '3D Geometry', pyq: 9, time: 90, priority: 'High' },
-    { chapter: 'Vectors', pyq: 8, time: 75, priority: 'High' },
+    { chapter: 'Logarithm', lectures: 12, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Quadratic Equations', lectures: 16, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Sequence & Progression', lectures: 14, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Trigonometry P1', lectures: 17, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Trigonometry P2', lectures: 9, pyq: 7, time: 75, priority: 'High' },
+    { chapter: 'Sum of Trigonometry', lectures: 10, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Basic Straight Line', lectures: 26, pyq: 9, time: 120, priority: 'High' },
+    { chapter: 'Circle', lectures: 14, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'P & C', lectures: 12, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Binomial', lectures: 12, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Set & Relation', lectures: 2, pyq: 4, time: 60, priority: 'Medium' },
+    { chapter: 'Function', lectures: 28, pyq: 9, time: 120, priority: 'High' },
+    { chapter: 'ITF', lectures: 19, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Limit', lectures: 16, pyq: 9, time: 90, priority: 'High' },
+    { chapter: 'Continuity', lectures: 14, pyq: 7, time: 90, priority: 'High' },
+    { chapter: 'Differentiability', lectures: 10, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'MOD', lectures: 9, pyq: 6, time: 75, priority: 'High' },
+    { chapter: 'Indefinite Integration', lectures: 18, pyq: 9, time: 120, priority: 'High' },
+    { chapter: 'Definite Integration', lectures: 12, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'AOD', lectures: 17, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'AUC', lectures: 9, pyq: 7, time: 75, priority: 'High' },
+    { chapter: 'Differential Equation', lectures: 9, pyq: 7, time: 75, priority: 'High' },
+    { chapter: 'Matrix', lectures: 9, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Determinant', lectures: 10, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Vector', lectures: 22, pyq: 9, time: 90, priority: 'High' },
+    { chapter: '3D Geometry', lectures: 8, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Probability', lectures: 10, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'Complex Numbers', lectures: 18, pyq: 8, time: 90, priority: 'High' },
+    { chapter: 'H & D', lectures: 1, pyq: 3, time: 45, priority: 'Low' },
+    { chapter: 'Static', lectures: 2, pyq: 3, time: 60, priority: 'Low' },
+    { chapter: 'M Logic', lectures: 1, pyq: 2, time: 45, priority: 'Low' },
   ]
 };
 
-async function autoGenerateTasks(userId) {
-  const todayStr = today();
-  const existing = await Task.find({ userId, dueDate: todayStr, autoGenerated: true });
-  if (existing.length > 0) return; // Already generated today
+const TOTAL = { Physics: 306, Chemistry: 225, Mathematics: 309, total: 840 };
 
-  const user = await User.findById(userId);
-  const dayOfWeek = new Date().getDay(); // 0=Sun, 1=Mon...
-  
-  // Rotate through chapters based on day
-  const subjects = ['Physics', 'Chemistry', 'Mathematics'];
-  const tasksToCreate = [];
-
-  subjects.forEach((subj, si) => {
-    const chapters = JEE_CHAPTERS[subj];
-    const idx = (dayOfWeek + si * 4) % chapters.length;
-    const ch = chapters[idx];
-    
-    // Extra task for weak subject
-    const isWeak = subj === (user?.weakSubject || 'Physics');
-    
-    tasksToCreate.push({
-      userId, title: `Study ${ch.chapter}`, subject: subj,
-      chapter: ch.chapter, priority: ch.priority,
-      importance: ch.pyq >= 10 ? 'Critical' : ch.pyq >= 7 ? 'Important' : 'Normal',
-      timeRequired: ch.time, pyqCount: ch.pyq,
-      dueDate: todayStr, autoGenerated: true, completed: false
-    });
-
-    if (isWeak) {
-      // Extra PYQ task for weak subject
-      const idx2 = (idx + 1) % chapters.length;
-      const ch2 = chapters[idx2];
-      tasksToCreate.push({
-        userId, title: `PYQ Practice: ${ch2.chapter}`, subject: subj,
-        chapter: ch2.chapter, priority: 'High',
-        importance: 'Critical', timeRequired: 45, pyqCount: ch2.pyq,
-        dueDate: todayStr, autoGenerated: true, completed: false
-      });
-    }
-  });
-
-  // Revision task
-  tasksToCreate.push({
-    userId, title: 'Daily Revision — Formulas & Concepts', subject: 'Physics',
-    chapter: 'All Subjects', priority: 'High', importance: 'Important',
-    timeRequired: 30, pyqCount: 0, dueDate: todayStr, autoGenerated: true, completed: false
-  });
-
-  await Task.insertMany(tasksToCreate);
+function getWeekStr() {
+  const n = new Date(), s = new Date(n.getFullYear(), 0, 1);
+  return `${n.getFullYear()}-W${String(Math.ceil(((n-s)/86400000+s.getDay()+1)/7)).padStart(2,'0')}`;
 }
 
-// ── AUTH ROUTES ──────────────────────────────────────────────
+async function autoGenerateTasks(userId) {
+  const todayStr = today();
+  const existing = await Task.find({ userId, dueDate: todayStr });
+  if (existing.length > 0) return existing;
+
+  const daysLeft = Math.ceil((new Date('2027-01-20') - new Date()) / 86400000);
+  const week = getWeekStr();
+  const schedule = await Schedule.findOne({ userId, week });
+  const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date().getDay()];
+
+  let subjects = ['Physics', 'Chemistry', 'Mathematics'];
+  if (schedule?.slots) {
+    const ds = [...new Set(schedule.slots
+      .filter(s => s.day === dayName && s.subject !== 'Break' && s.subject !== 'Revision')
+      .map(s => s.subject))];
+    if (ds.length > 0) subjects = ds;
+  }
+
+  const completedTasks = await Task.find({ userId, completed: true, autoGenerated: true }).select('chapter subject');
+  const completedChapters = completedTasks.map(t => `${t.subject}-${t.chapter}`);
+  const newTasks = [];
+
+  for (const subject of subjects) {
+    const chapters = SYLLABUS[subject] || [];
+    const available = chapters.filter(c => !completedChapters.includes(`${subject}-${c.chapter}`));
+    if (!available.length) continue;
+
+    // Sort: High priority first, then most lectures (most important chapters)
+    const sorted = available.sort((a, b) => {
+      const pa = a.priority === 'High' ? 0 : a.priority === 'Medium' ? 1 : 2;
+      const pb = b.priority === 'High' ? 0 : b.priority === 'Medium' ? 1 : 2;
+      if (pa !== pb) return pa - pb;
+      return b.lectures - a.lectures;
+    });
+
+    const pick = sorted[0];
+    const lecturesPerDay = Math.max(1, Math.ceil(pick.lectures / Math.max(Math.ceil(daysLeft / 3), 1)));
+
+    // Watch lecture task
+    const task = await Task.create({
+      userId,
+      title: `📺 ${pick.chapter} — Watch ${lecturesPerDay} lecture${lecturesPerDay > 1 ? 's' : ''}`,
+      subject, chapter: pick.chapter,
+      priority: pick.priority, importance: 'Important',
+      lectures: lecturesPerDay,
+      timeRequired: lecturesPerDay * 45,
+      pyqCount: pick.pyq,
+      dueDate: todayStr, autoGenerated: true
+    });
+    newTasks.push(task);
+
+    // PYQ solve task for high priority chapters
+    if (pick.priority === 'High') {
+      const pyqTask = await Task.create({
+        userId,
+        title: `📝 ${pick.chapter} PYQs — Solve ${pick.pyq} questions`,
+        subject, chapter: pick.chapter,
+        priority: 'High', importance: 'Critical',
+        lectures: 0, timeRequired: 60, pyqCount: pick.pyq,
+        dueDate: todayStr, autoGenerated: true
+      });
+      newTasks.push(pyqTask);
+    }
+  }
+
+  // Daily revision task
+  await Task.create({
+    userId, title: '🔄 Revision — Previous day chapters',
+    subject: 'Physics', chapter: 'Revision',
+    priority: 'Medium', importance: 'Important',
+    lectures: 0, timeRequired: 60, pyqCount: 0,
+    dueDate: todayStr, autoGenerated: true
+  });
+
+  return await Task.find({ userId, dueDate: todayStr }).sort({ priority: 1, pyqCount: -1 });
+}
+
+// ═══ AUTH ROUTES ═══
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password) return res.status(400).json({ error: 'All fields required' });
-    if (await User.findOne({ email })) return res.status(400).json({ error: 'Email already registered' });
+    if (await User.findOne({ email })) return res.status(400).json({ error: 'Email already exists' });
     const hashed = await bcrypt.hash(password, 12);
     const user = await User.create({ name, email, password: hashed });
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: 'Invalid credentials' });
-    if (!await bcrypt.compare(password, user.password)) return res.status(400).json({ error: 'Invalid credentials' });
+    if (!user || !await bcrypt.compare(password, user.password))
+      return res.status(400).json({ error: 'Invalid credentials' });
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '30d' });
-    // Auto generate today's tasks on login
-    autoGenerateTasks(user._id).catch(console.error);
     res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/auth/me', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select('-password');
-    res.json(user);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json(await User.findById(req.userId).select('-password'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── PROGRESS ROUTES ──────────────────────────────────────────
+// ═══ PROGRESS ROUTES ═══
 app.get('/api/progress/today', auth, async (req, res) => {
   try {
-    let p = await Progress.findOne({ userId: req.userId, date: today() });
-    if (!p) p = { studyTime: 0, tasksCompleted: 0, tasksTotal: 0, date: today() };
-    res.json(p);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    let prog = await Progress.findOne({ userId: req.userId, date: today() });
+    if (!prog) prog = { studyTime: 0, tasksCompleted: 0, tasksTotal: 0, lecturesDone: 0, date: today() };
+    res.json(prog);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.put('/api/progress/today', auth, async (req, res) => {
   try {
-    const update = req.body;
-    // Only ADD time, never replace (prevents fake data)
-    let p = await Progress.findOne({ userId: req.userId, date: today() });
-    if (!p) {
-      p = await Progress.create({ userId: req.userId, date: today(), ...update });
-    } else {
-      if (update.studyTime) p.studyTime = (p.studyTime || 0) + update.studyTime;
-      if (update.tasksCompleted !== undefined) p.tasksCompleted = update.tasksCompleted;
-      if (update.tasksTotal !== undefined) p.tasksTotal = update.tasksTotal;
-      await p.save();
+    const u = req.body;
+    if (u.studyTime !== undefined)
+      await Progress.findOneAndUpdate({ userId: req.userId, date: today() }, { $inc: { studyTime: u.studyTime } }, { upsert: true });
+    if (u.tasksTotal !== undefined)
+      await Progress.findOneAndUpdate({ userId: req.userId, date: today() }, { $set: { tasksTotal: u.tasksTotal, tasksCompleted: u.tasksCompleted } }, { upsert: true });
+    if (u.lecturesDone !== undefined)
+      await Progress.findOneAndUpdate({ userId: req.userId, date: today() }, { $inc: { lecturesDone: u.lecturesDone } }, { upsert: true });
+    if (u.subject && u.minutes) {
+      const su = {}; su[`subjectTime.${u.subject}`] = u.minutes;
+      await Progress.findOneAndUpdate({ userId: req.userId, date: today() }, { $inc: su }, { upsert: true });
     }
-    io.to(req.userId.toString()).emit('progress_update', p);
-    res.json(p);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const prog = await Progress.findOne({ userId: req.userId, date: today() });
+    io.to(req.userId.toString()).emit('progress_update', prog);
+    res.json(prog);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/progress/stats', auth, async (req, res) => {
   try {
-    const history = await Progress.find({ userId: req.userId }).sort({ date: -1 }).limit(90).lean();
+    const history = await Progress.find({ userId: req.userId }).sort({ date: -1 }).limit(30).lean();
+    const totalStudyTime = history.reduce((s, p) => s + (p.studyTime || 0), 0);
+    const totalTasks = await Task.countDocuments({ userId: req.userId, completed: true });
+    const totalLectures = history.reduce((s, p) => s + (p.lecturesDone || 0), 0);
+    const validDays = history.filter(p => p.tasksTotal > 0);
+    const avgSuccess = validDays.length
+      ? validDays.reduce((s, p) => s + (p.tasksCompleted / p.tasksTotal * 100), 0) / validDays.length
+      : 0;
     const streak = await calcStreak(req.userId);
     const rank = await calcRank(req.userId);
-    const totalStudyTime = history.reduce((s, p) => s + (p.studyTime || 0), 0);
-    const totalTasks = history.reduce((s, p) => s + (p.tasksCompleted || 0), 0);
-    const daysStudied = history.filter(p => p.studyTime > 0).length;
-    const avgSuccess = history.length
-      ? history.filter(p => p.tasksTotal > 0).reduce((s, p) => s + ((p.tasksCompleted / p.tasksTotal) * 100), 0) / Math.max(1, history.filter(p => p.tasksTotal > 0).length)
-      : 0;
-    
-    // Check achievements
-    const totalHours = Math.round(totalStudyTime / 60);
-    const newAchs = await checkAchievements(req.userId, streak, totalTasks, totalHours);
+    const daysToMains = Math.ceil((new Date('2027-01-20') - new Date()) / 86400000);
+    const daysToAdv = Math.ceil((new Date('2027-05-17') - new Date()) / 86400000);
+    const phTime = history.reduce((s, p) => s + (p.subjectTime?.Physics || 0), 0);
+    const chTime = history.reduce((s, p) => s + (p.subjectTime?.Chemistry || 0), 0);
+    const maTime = history.reduce((s, p) => s + (p.subjectTime?.Mathematics || 0), 0);
+    const totalSubj = Math.max(phTime + chTime + maTime, 1);
+    const lectPct = Math.min(100, Math.round(totalLectures / TOTAL.total * 100));
+    const dailyLecTarget = Math.ceil(TOTAL.total / Math.max(daysToMains, 1));
+
+    const newAchs = await checkAchievements(req.userId, streak, totalTasks, Math.round(totalStudyTime / 60));
     newAchs.forEach(a => io.to(req.userId.toString()).emit('achievement_unlocked', a));
 
-    res.json({ streak, rank, totalStudyTime, totalTasks, daysStudied, avgSuccess: Math.round(avgSuccess) });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({
+      totalStudyTime, totalTasks, avgSuccess: Math.round(avgSuccess),
+      streak, rank, daysToMains, daysToAdv,
+      studyDays: history.filter(p => p.studyTime > 0).length,
+      lectureProgress: {
+        totalDone: totalLectures,
+        totalRemaining: Math.max(0, TOTAL.total - totalLectures),
+        dailyTarget: dailyLecTarget,
+        pct: lectPct,
+        phDaily: Math.ceil(TOTAL.Physics / Math.max(daysToMains, 1)),
+        chDaily: Math.ceil(TOTAL.Chemistry / Math.max(daysToMains, 1)),
+        maDaily: Math.ceil(TOTAL.Mathematics / Math.max(daysToMains, 1)),
+      },
+      subjectPct: {
+        Physics: Math.round(phTime / totalSubj * 100),
+        Chemistry: Math.round(chTime / totalSubj * 100),
+        Mathematics: Math.round(maTime / totalSubj * 100)
+      }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/progress/history', auth, async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 7;
-    const history = await Progress.find({ userId: req.userId }).sort({ date: -1 }).limit(days).lean();
-    res.json(history);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json(await Progress.find({ userId: req.userId }).sort({ date: -1 }).limit(days));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── TASK ROUTES ──────────────────────────────────────────────
+// ═══ SYLLABUS ═══
+app.get('/api/syllabus', auth, async (req, res) => {
+  res.json({ syllabus: SYLLABUS, totals: TOTAL });
+});
+
+// ═══ TASK ROUTES ═══
 app.get('/api/tasks', auth, async (req, res) => {
   try {
-    const { date, subject } = req.query;
+    const { date, subject, completed } = req.query;
     let query = { userId: req.userId };
     if (subject) query.subject = subject;
+    if (completed !== undefined) query.completed = completed === 'true';
     if (date) query.dueDate = date;
-    const tasks = await Task.find(query).sort({ priority: 1, pyqCount: -1, createdAt: 1 });
+    let tasks = await Task.find(query).sort({ priority: 1, pyqCount: -1, createdAt: -1 });
+    if (date === today() && tasks.length === 0) tasks = await autoGenerateTasks(req.userId);
     res.json(tasks);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/tasks', auth, async (req, res) => {
@@ -353,7 +468,7 @@ app.post('/api/tasks', auth, async (req, res) => {
     const task = await Task.create({ ...req.body, userId: req.userId });
     io.to(req.userId.toString()).emit('task_added', task);
     res.json(task);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.put('/api/tasks/:id', auth, async (req, res) => {
@@ -362,211 +477,172 @@ app.put('/api/tasks/:id', auth, async (req, res) => {
       { _id: req.params.id, userId: req.userId },
       { $set: req.body }, { new: true }
     );
-    if (req.body.completed) {
-      const todayStr = today();
-      const allTasks = await Task.find({ userId: req.userId, dueDate: todayStr });
-      const done = allTasks.filter(t => t.completed).length;
+    if (req.body.completed && task.lectures > 0) {
       await Progress.findOneAndUpdate(
-        { userId: req.userId, date: todayStr },
-        { $set: { tasksCompleted: done, tasksTotal: allTasks.length } },
+        { userId: req.userId, date: today() },
+        { $inc: { lecturesDone: task.lectures } },
         { upsert: true }
       );
-      io.to(req.userId.toString()).emit('task_updated', { task, done, total: allTasks.length });
     }
+    if (req.body.completed) {
+      const done = await Task.countDocuments({ userId: req.userId, completed: true });
+      const streak = await calcStreak(req.userId);
+      const hrsAgg = await Progress.aggregate([
+        { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
+        { $group: { _id: null, t: { $sum: '$studyTime' } } }
+      ]);
+      const hrs = Math.round((hrsAgg[0]?.t || 0) / 60);
+      const newAchs = await checkAchievements(req.userId, streak, done, hrs);
+      newAchs.forEach(a => io.to(req.userId.toString()).emit('achievement_unlocked', a));
+    }
+    io.to(req.userId.toString()).emit('task_updated', task);
     res.json(task);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/tasks/:id', auth, async (req, res) => {
   try {
     await Task.findOneAndDelete({ _id: req.params.id, userId: req.userId });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/tasks/generate', auth, async (req, res) => {
-  try {
-    // Delete today's auto tasks and regenerate
-    await Task.deleteMany({ userId: req.userId, dueDate: today(), autoGenerated: true, completed: false });
-    await autoGenerateTasks(req.userId);
-    const tasks = await Task.find({ userId: req.userId, dueDate: today() }).sort({ priority: 1 });
-    res.json(tasks);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── SCHEDULE ROUTES ──────────────────────────────────────────
+// ═══ SCHEDULE ═══
 app.get('/api/schedule', auth, async (req, res) => {
   try {
-    const week = req.query.week || getWeek();
+    const week = req.query.week || getWeekStr();
     const sch = await Schedule.findOne({ userId: req.userId, week });
-    res.json(sch || { slots: [], routine: {} });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json(sch || { slots: [], routine: null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/schedule', auth, async (req, res) => {
   try {
     const { week, slots, routine } = req.body;
     const sch = await Schedule.findOneAndUpdate(
-      { userId: req.userId, week: week || getWeek() },
+      { userId: req.userId, week: week || getWeekStr() },
       { $set: { slots, routine } },
       { upsert: true, new: true }
     );
-    // Update user weak subject from routine
-    if (routine?.weakSubject) {
-      await User.findByIdAndUpdate(req.userId, { weakSubject: routine.weakSubject });
-    }
+    if (routine?.weakSubject) await User.findByIdAndUpdate(req.userId, { weakSubject: routine.weakSubject });
     res.json(sch);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── ACHIEVEMENT ROUTES ───────────────────────────────────────
+// ═══ ACHIEVEMENTS ═══
 app.get('/api/achievements', auth, async (req, res) => {
   try {
-    const achs = await Achievement.find({ userId: req.userId }).sort({ earnedAt: -1 });
-    res.json(achs);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json(await Achievement.find({ userId: req.userId }).sort({ earnedAt: -1 }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── LEADERBOARD ──────────────────────────────────────────────
+// ═══ LEADERBOARD ═══
 app.get('/api/leaderboard', auth, async (req, res) => {
   try {
-    const pipeline = [
-      { $group: { _id: '$userId', totalStudyTime: { $sum: '$studyTime' }, tasksCompleted: { $sum: '$tasksCompleted' }, avgSuccess: { $avg: { $cond: [{ $gt: ['$tasksTotal', 0] }, { $multiply: [{ $divide: ['$tasksCompleted', '$tasksTotal'] }, 100] }, 0] } } } },
-      { $sort: { totalStudyTime: -1 } },
-      { $limit: 20 },
+    const thirtyAgo = new Date(); thirtyAgo.setDate(thirtyAgo.getDate() - 30);
+    const lb = await Progress.aggregate([
+      { $match: { date: { $gte: thirtyAgo.toISOString().split('T')[0] } } },
+      { $group: { _id: '$userId', totalTime: { $sum: '$studyTime' }, tasksDone: { $sum: '$tasksCompleted' }, lecturesDone: { $sum: '$lecturesDone' } } },
+      { $sort: { totalTime: -1 } }, { $limit: 20 },
       { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
       { $unwind: '$user' },
-      { $project: { name: '$user.name', totalStudyTime: 1, tasksCompleted: 1, avgSuccess: 1 } }
-    ];
-    const lb = await Progress.aggregate(pipeline);
+      { $project: { name: '$user.name', totalTime: 1, tasksDone: 1, lecturesDone: 1 } }
+    ]);
     res.json(lb.map((u, i) => ({ ...u, rank: i + 1 })));
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── MOCK TEST ROUTES ─────────────────────────────────────────
+// ═══ MOCK TEST ═══
 app.post('/api/mocktest', auth, async (req, res) => {
   try {
     const test = await MockTest.create({ ...req.body, userId: req.userId });
+    await Progress.findOneAndUpdate(
+      { userId: req.userId, date: today() },
+      { $inc: { studyTime: Math.round((req.body.timeTaken || 1800) / 60) } },
+      { upsert: true }
+    );
     res.json(test);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/mocktest/history', auth, async (req, res) => {
   try {
-    const tests = await MockTest.find({ userId: req.userId }).sort({ completedAt: -1 }).limit(10);
-    res.json(tests);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json(await MockTest.find({ userId: req.userId }).sort({ completedAt: -1 }).limit(10));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── AI CHAT ROUTE ────────────────────────────────────────────
+// ═══ AI CHAT ═══
 app.post('/api/chat', auth, async (req, res) => {
   try {
     const { message } = req.body;
     const user = await User.findById(req.userId).select('-password');
     const todayProg = await Progress.findOne({ userId: req.userId, date: today() });
-    const stats = await Progress.aggregate([
-      { $match: { userId: new mongoose.Types.ObjectId(req.userId) } },
-      { $group: { _id: null, total: { $sum: '$studyTime' } } }
-    ]);
-    const totalHrs = Math.round((stats[0]?.total || 0) / 60);
-    const streak = await calcStreak(req.userId);
+    const pending = await Task.find({ userId: req.userId, completed: false, dueDate: today() }).limit(5);
     const daysLeft = Math.ceil((new Date('2027-01-20') - new Date()) / 86400000);
+    const streak = await calcStreak(req.userId);
     const recentChats = await Chat.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(8);
+    const dailyLec = Math.ceil(TOTAL.total / Math.max(daysLeft, 1));
 
     await Chat.create({ userId: req.userId, role: 'user', content: message });
 
-    const systemPrompt = `You are StudyBot, an expert JEE 2027 AI coach for ${user.name}.
-
-Student Status:
-- Days to JEE Mains 2027: ${daysLeft}
-- Total study time: ${totalHrs} hours
-- Today's study: ${Math.round((todayProg?.studyTime||0)/60*10)/10} hours
-- Current streak: ${streak} days
-- Weak subject: ${user.weakSubject}
-
-You help with:
-1. JEE Physics, Chemistry, Mathematics doubts (class 11-12 level)
-2. Study plans and timetables
-3. Chapter strategies and important topics
-4. Motivation and mindset
-5. Progress analysis
-
-Be concise, motivating, and JEE-focused. Use bullet points. Always end with encouragement.`;
+    const systemPrompt = `You are StudyBot, expert JEE 2027 AI coach for ${user.name}.
+Status: ${daysLeft} days to JEE Mains. Study today: ${todayProg?.studyTime||0} min. Tasks: ${todayProg?.tasksCompleted||0}/${todayProg?.tasksTotal||0}. Lectures today: ${todayProg?.lecturesDone||0}/${dailyLec}. Streak: ${streak} days.
+Syllabus: Physics 306 lectures, Chemistry 225, Math 309. Total 840. Daily target: ${dailyLec} lectures.
+Be concise, motivating, JEE-specific.`;
 
     const history = recentChats.reverse().map(c => ({ role: c.role, content: c.content }));
     history.push({ role: 'user', content: message });
 
     let reply = '';
     const apiKey = process.env.CLAUDE_API_KEY;
-
-    if (apiKey && !apiKey.includes('xxxxx')) {
-      try {
-        const resp = await axios.post('https://api.anthropic.com/v1/messages', {
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 800,
-          system: systemPrompt,
-          messages: history
-        }, { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } });
-        reply = resp.data.content[0].text;
-      } catch (e) { reply = getSmartReply(message, daysLeft, streak, totalHrs); }
+    if (apiKey && apiKey !== 'your_anthropic_api_key_here') {
+      const resp = await axios.post('https://api.anthropic.com/v1/messages',
+        { model: 'claude-sonnet-4-20250514', max_tokens: 800, system: systemPrompt, messages: history },
+        { headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } }
+      );
+      reply = resp.data.content[0].text;
     } else {
-      reply = getSmartReply(message, daysLeft, streak, totalHrs);
+      const m = message.toLowerCase();
+      if (m.includes('lecture') || m.includes('how many'))
+        reply = `📺 **Daily Lecture Target:**\n• Total: 840 lectures remaining\n• Physics: 306 · Chemistry: 225 · Math: 309\n• Days left: ${daysLeft}\n• **Target: ${dailyLec} lectures/day**\n\nPer subject:\n• Physics: ${Math.ceil(306/daysLeft)}/day\n• Chemistry: ${Math.ceil(225/daysLeft)}/day\n• Maths: ${Math.ceil(309/daysLeft)}/day`;
+      else if (m.includes('motivat') || m.includes('tired'))
+        reply = `💪 **${daysLeft} days. ${dailyLec} lectures/day.**\n\n840 lectures total. Every skipped day = ${dailyLec} extra tomorrow.\n\n🔥 Streak: ${streak} days!\n\nJust open ONE lecture. You'll do more. Go! 🚀`;
+      else if (m.includes('plan') || m.includes('schedule'))
+        reply = `📅 **Daily Plan (${daysLeft} days left)**\n\n• 5-7 AM → Physics (${Math.ceil(306/daysLeft)} lectures)\n• 7-9 AM → Chemistry (${Math.ceil(225/daysLeft)} lectures)\n• 9-11 AM → PYQ Practice\n• 11-1 PM → Maths (${Math.ceil(309/daysLeft)} lectures)\n• 2-4 PM → Revision\n• 4-6 PM → Mock Test\n• 7-9 PM → Doubts`;
+      else
+        reply = `🤖 **StudyBot** — ${daysLeft} days to JEE Mains\n\nDaily target: **${dailyLec} lectures**\n• Physics: ${Math.ceil(306/daysLeft)}/day\n• Chemistry: ${Math.ceil(225/daysLeft)}/day\n• Math: ${Math.ceil(309/daysLeft)}/day\n\nStreak: ${streak} days 🔥\nAsk me anything!`;
     }
 
     await Chat.create({ userId: req.userId, role: 'assistant', content: reply });
     res.json({ reply });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-function getSmartReply(msg, daysLeft, streak, totalHrs) {
-  const m = msg.toLowerCase();
-  if (m.includes('plan') || m.includes('timetable') || m.includes('schedule'))
-    return `📅 **Recommended Daily Schedule for JEE 2027**\n\n• 5:00–6:00 AM → Wake up + Revision\n• 6:00–8:00 AM → Mathematics\n• 8:30–10:30 AM → Physics\n• 11:00–1:00 PM → Chemistry\n• 2:00–4:00 PM → PYQ Practice\n• 4:30–6:30 PM → Weak Subject Extra\n• 7:00–9:00 PM → Problem Solving\n• 9:00–10:00 PM → Revision + Notes\n\n🎯 Target **10 hours/day** — You have **${daysLeft} days** left. Every hour counts!`;
-  if (m.includes('motivat') || m.includes('tired') || m.includes('give up') || m.includes('fail'))
-    return `💪 **Don't give up — you're closer than you think!**\n\nYou've already studied **${totalHrs} hours** and maintained a **${streak}-day streak**. That's real dedication!\n\n• Every JEE topper felt exactly like you right now\n• The pain of discipline is temporary\n• The pride of IIT is forever\n• ${daysLeft} days is MORE than enough if you use them wisely\n\nGet up, drink water, and open your book. Your future self is counting on TODAY! 🚀`;
-  if (m.includes('physics'))
-    return `⚡ **Physics JEE Strategy**\n\n**Most Important (12+ questions):**\n• Electrostatics & Current Electricity\n• Modern Physics\n• SHM & Waves\n• Optics\n\n**Books:** HC Verma (concepts) + DC Pandey (problems)\n\n**Strategy:**\n• Solve 20 MCQs daily\n• Focus on numerical problems\n• Last 10yr PYQs chapter-wise\n• Revise formulas every morning`;
-  if (m.includes('chemistry'))
-    return `🧪 **Chemistry JEE Strategy**\n\n**High Scoring:**\n• Organic Chemistry (name reactions, mechanisms)\n• Coordination Compounds\n• Electrochemistry\n• Chemical Equilibrium\n\n**Books:** NCERT (Inorganic) + MS Chauhan (Organic)\n\n**Strategy:**\n• NCERT is Bible for Inorganic — read 3 times\n• Make reaction charts for Organic\n• Solve 30 MCQs daily\n• Sunday full Chemistry revision`;
-  if (m.includes('math') || m.includes('maths'))
-    return `📐 **Mathematics JEE Strategy**\n\n**Most Important (40%+ weightage):**\n• Calculus (Integration especially)\n• Coordinate Geometry\n• Algebra (Complex Numbers, Matrices)\n• Probability\n\n**Books:** Cengage → Arihant → PYQs\n\n**Strategy:**\n• 25 problems daily minimum\n• Focus on speed + accuracy\n• Integration: practice 10 questions daily\n• Never skip 3D Geometry`;
-  if (m.includes('progress') || m.includes('how am i'))
-    return `📊 **Your Progress:**\n\n• Total study time: **${totalHrs} hours**\n• Current streak: **${streak} days** 🔥\n• Days left to JEE: **${daysLeft}**\n\n${totalHrs < 50 ? '⚠️ Need to increase hours! Target 300+ hours in next 30 days.' : totalHrs < 200 ? '🎯 Good start! Keep pushing for 500+ total hours.' : '✅ Excellent dedication! Maintain this pace.'}\n\nFocus on weak areas and PYQ practice. You've got this! 💪`;
-  return `🤖 **StudyBot here!** I'm your JEE 2027 coach.\n\nYou have **${daysLeft} days** left with a **${streak}-day** study streak. 💪\n\nI can help you with:\n• 📚 Physics, Chemistry, Math doubts\n• 📅 Study plans & schedules\n• 🎯 Chapter strategies\n• 💪 Motivation\n• 📊 Progress analysis\n\nWhat do you need help with?`;
-}
-
-// ── SOCKET.IO ─────────────────────────────────────────────────
-io.on('connection', socket => {
-  socket.on('join', userId => {
-    socket.join(userId);
-    console.log(`User ${userId} joined`);
+// ═══ SOCKET.IO ═══
+io.on('connection', (socket) => {
+  socket.on('join', (userId) => socket.join(userId));
+  socket.on('study_start', ({ userId, subject }) => {
+    io.to(userId).emit('study_status', { active: true, subject });
   });
-
-  socket.on('study_start', async ({ userId, subject }) => {
-    io.to(userId).emit('study_started', { subject, time: Date.now() });
+  socket.on('study_end', async ({ userId, subject, minutes }) => {
+    if (minutes > 0) {
+      try {
+        const inc = { studyTime: minutes };
+        if (['Physics','Chemistry','Mathematics'].includes(subject)) inc[`subjectTime.${subject}`] = minutes;
+        await Progress.findOneAndUpdate({ userId, date: today() }, { $inc: inc }, { upsert: true });
+        const prog = await Progress.findOne({ userId, date: today() });
+        io.to(userId).emit('progress_update', prog);
+        io.to(userId).emit('study_status', { active: false });
+      } catch(e) {}
+    }
   });
-
-  socket.on('study_end', async ({ userId, minutes, subject }) => {
-    try {
-      if (minutes < 1) return;
-      let p = await Progress.findOne({ userId, date: today() });
-      if (!p) p = await Progress.create({ userId, date: today(), studyTime: 0 });
-      p.studyTime = (p.studyTime || 0) + minutes;
-      await p.save();
-      io.to(userId).emit('progress_update', p);
-      io.to(userId).emit('study_time_live', { total: p.studyTime, added: minutes });
-    } catch (e) { console.error(e); }
-  });
-
-  socket.on('disconnect', () => console.log('Socket disconnected'));
 });
-
-function getWeek() {
-  const n = new Date(), s = new Date(n.getFullYear(), 0, 1);
-  return `${n.getFullYear()}-W${String(Math.ceil(((n - s) / 86400000 + s.getDay() + 1) / 7)).padStart(2, '0')}`;
-}
 
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../Frontend/index.html')));
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`\n🚀 StudyUp Server on http://localhost:${PORT}\n`));
+server.listen(PORT, () => {
+  console.log(`\n🚀 StudyUp on http://localhost:${PORT}`);
+  console.log(`📚 Physics(306) + Chemistry(225) + Math(309) = 840 total lectures`);
+  console.log(`🎯 JEE 2027 Ready!\n`);
+});
